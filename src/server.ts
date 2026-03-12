@@ -82,7 +82,7 @@ export class LyraAgent extends AIChatAgent<Env> {
         : "\n\nI don't know much about this listener yet — still learning their taste.";
 
     const result = streamText({
-      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       system: `You are Lyra — a deeply personal AI music companion. You don't just recommend music, you learn what moves someone and curate experiences that feel almost like reading their mind.
 
 Your personality: warm, curious, a little poetic. You talk about music the way someone who genuinely loves it would — not just listing songs, but describing *why* a track might hit differently right now.
