@@ -40,7 +40,8 @@ interface Track {
   album: string;
   image: string;
   preview_url: string | null;
-  spotify_url: string;
+  store_url: string;
+  genre?: string;
 }
 
 interface TrackCardProps {
@@ -131,13 +132,13 @@ function TrackCard({ track, isPlaying, onTogglePlay }: TrackCardProps) {
           </button>
         )}
         <a
-          href={track.spotify_url}
+          href={track.store_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="w-8 h-8 rounded-full bg-green-500/10 hover:bg-green-500/20 flex items-center justify-center transition-colors"
-          title="Open in Spotify"
+          className="w-8 h-8 rounded-full bg-kumo-accent/10 hover:bg-kumo-accent/20 flex items-center justify-center transition-colors"
+          title="Open in Apple Music"
         >
-          <ArrowSquareOutIcon size={13} className="text-green-500" />
+          <ArrowSquareOutIcon size={13} className="text-kumo-accent" />
         </a>
       </div>
     </div>
@@ -236,7 +237,7 @@ function isTrackArray(output: unknown): output is Track[] {
     output.length > 0 &&
     typeof output[0] === "object" &&
     output[0] !== null &&
-    "spotify_url" in output[0]
+    "store_url" in output[0]
   );
 }
 

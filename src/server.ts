@@ -10,84 +10,48 @@ import {
 } from "ai";
 import { z } from "zod";
 
-// --- Spotify types ---
+// --- iTunes Search API ---
+// No auth required — completely free and open
 
-interface SpotifyTrack {
-  id: string;
-  name: string;
-  artists: { id: string; name: string }[];
-  album: {
-    name: string;
-    images: { url: string }[];
-  };
-  preview_url: string | null;
-  external_urls: { spotify: string };
+interface ItunesTrack {
+  trackId: number;
+  trackName: string;
+  artistName: string;
+  collectionName: string;
+  artworkUrl100: string;
+  previewUrl?: string;
+  trackViewUrl: string;
+  primaryGenreName: string;
 }
 
-interface SpotifySearchResponse {
-  tracks: { items: SpotifyTrack[] };
+interface ItunesSearchResponse {
+  results: ItunesTrack[];
 }
 
-interface SpotifyRecommendationsResponse {
-  tracks: SpotifyTrack[];
-}
-
-// --- Spotify helpers ---
-
-async function getSpotifyToken(
-  clientId: string,
-  clientSecret: string
-): Promise<string> {
-  const resp = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`
-    },
-    body: "grant_type=client_credentials"
-  });
-  const data = (await resp.json()) as { access_token: string };
-  return data.access_token;
-}
-
-function formatTrack(track: SpotifyTrack) {
+function formatTrack(track: ItunesTrack) {
   return {
-    id: track.id,
-    name: track.name,
-    artist: track.artists[0]?.name ?? "Unknown",
-    artistId: track.artists[0]?.id ?? "",
-    album: track.album.name,
-    image: track.album.images[0]?.url ?? "",
-    preview_url: track.preview_url,
-    spotify_url: track.external_urls.spotify
+    id: String(track.trackId),
+    name: track.trackName,
+    artist: track.artistName,
+    album: track.collectionName,
+    // Upgrade artwork from 100x100 to 300x300 for better quality
+    image: track.artworkUrl100.replace("100x100bb", "300x300bb"),
+    preview_url: track.previewUrl ?? null,
+    store_url: track.trackViewUrl,
+    genre: track.primaryGenreName
   };
 }
 
-async function spotifySearchTracks(
-  query: string,
-  token: string,
-  limit = 5
-): Promise<ReturnType<typeof formatTrack>[]> {
-  const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=${limit}`;
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` }
+async function itunesSearch(query: string, limit = 5) {
+  const params = new URLSearchParams({
+    term: query,
+    media: "music",
+    entity: "song",
+    limit: String(Math.min(limit, 10))
   });
-  const data = (await resp.json()) as SpotifySearchResponse;
-  return data.tracks.items.map(formatTrack);
-}
-
-async function spotifySearchArtistId(
-  name: string,
-  token: string
-): Promise<string | null> {
-  const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(name)}&type=artist&limit=1`;
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  const data = (await resp.json()) as {
-    artists: { items: { id: string }[] };
-  };
-  return data.artists.items[0]?.id ?? null;
+  const resp = await fetch(`https://itunes.apple.com/search?${params}`);
+  const data = (await resp.json()) as ItunesSearchResponse;
+  return (data.results ?? []).map(formatTrack);
 }
 
 // --- Lyra Agent ---
@@ -107,7 +71,7 @@ export class LyraAgent extends AIChatAgent<Env> {
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
-    // Hydrate taste profile into system prompt context
+    // Hydrate taste profile into system prompt
     const tasteRows = this.sql<{ type: string; value: string }>`
       SELECT type, value FROM taste_profile ORDER BY created_at DESC LIMIT 30
     `;
@@ -124,13 +88,13 @@ export class LyraAgent extends AIChatAgent<Env> {
 Your personality: warm, curious, a little poetic. You talk about music the way someone who genuinely loves it would — not just listing songs, but describing *why* a track might hit differently right now.
 
 Core behaviors:
-- Always use tools to find real songs. Never invent track names.
-- When recommending, lead with *why* this music fits the moment, then list the tracks.
+- Always use tools to surface real songs. Never invent track names.
+- When recommending, lead with *why* this music fits the moment, then show the tracks.
 - When users express preferences ("I love", "I hate", "I'm in the mood for"), immediately call savePreference to remember it.
 - When you have taste profile data, weave it in naturally — like a friend who pays attention.
-- To recommend based on an artist: first call searchTracks to get real track IDs, then call getRecommendations with those IDs as seeds.
-- Keep responses conversational: 1–2 sentences of context, then the music.
-- If someone just says a vibe or mood (e.g. "something sad", "hype me up"), call getRecommendations with appropriate valence/energy values.${tasteContext}`,
+- For recommendations based on mood, genre, or artist: use getRecommendations with descriptive queries (e.g. "Tyler the Creator odd future", "melancholic r&b", "high energy rap workout").
+- For direct lookups: use searchTracks with the artist/song name.
+- Keep responses conversational: 1–2 sentences of context, then the music.${tasteContext}`,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages"
@@ -138,128 +102,66 @@ Core behaviors:
       tools: {
         searchTracks: tool({
           description:
-            "Search Spotify for tracks by song title, artist name, or a descriptive query. Also use this to get track/artist IDs before calling getRecommendations.",
+            "Search for tracks by song title or artist name. Use this for direct lookups — 'find songs by Frank Ocean', 'search for Nights'.",
           inputSchema: z.object({
             query: z
               .string()
-              .describe(
-                "Search query — song name, artist, album, or description"
-              ),
+              .describe("Artist name, song title, or album name"),
             limit: z
               .number()
               .min(1)
               .max(10)
               .optional()
               .default(5)
-              .describe("Number of results to return")
+              .describe("Number of results")
           }),
           execute: async ({ query, limit }) => {
-            const token = await getSpotifyToken(
-              this.env.SPOTIFY_CLIENT_ID,
-              this.env.SPOTIFY_CLIENT_SECRET
-            );
-            return await spotifySearchTracks(query, token, limit);
+            return await itunesSearch(query, limit);
           }
         }),
 
         getRecommendations: tool({
           description:
-            "Get Spotify track recommendations seeded from tracks, artists, or genres — with optional mood and energy tuning. Use searchTracks first to get real Spotify IDs.",
+            "Get music recommendations by running multiple descriptive searches. You provide the search queries — make them specific and evocative (e.g. 'chill late night r&b', 'aggressive trap', 'soulful jazz piano'). Results are deduplicated and curated.",
           inputSchema: z.object({
-            seedTrackIds: z
+            queries: z
               .array(z.string())
-              .max(3)
-              .optional()
-              .describe("Spotify track IDs (from searchTracks results)"),
-            seedArtistNames: z
-              .array(z.string())
-              .max(3)
-              .optional()
+              .min(1)
+              .max(4)
               .describe(
-                "Artist names to look up and seed recommendations from"
+                "2–4 descriptive search queries that capture the mood, genre, or artists to pull from"
               ),
-            seedGenres: z
-              .array(z.string())
-              .max(3)
-              .optional()
-              .describe(
-                "Genres: 'hip-hop', 'r-n-b', 'pop', 'jazz', 'soul', 'indie', 'electronic', etc."
-              ),
-            valence: z
+            limitPerQuery: z
               .number()
-              .min(0)
-              .max(1)
+              .min(1)
+              .max(5)
               .optional()
-              .describe("Mood — 0 = dark/melancholic, 1 = happy/upbeat"),
-            energy: z
-              .number()
-              .min(0)
-              .max(1)
-              .optional()
-              .describe("Energy — 0 = calm/mellow, 1 = intense/energetic"),
-            danceability: z
-              .number()
-              .min(0)
-              .max(1)
-              .optional()
-              .describe("Danceability — 0 = not danceable, 1 = very danceable")
+              .default(3)
+              .describe("Results per query (default 3)")
           }),
-          execute: async ({
-            seedTrackIds = [],
-            seedArtistNames = [],
-            seedGenres = [],
-            valence,
-            energy,
-            danceability
-          }) => {
-            const token = await getSpotifyToken(
-              this.env.SPOTIFY_CLIENT_ID,
-              this.env.SPOTIFY_CLIENT_SECRET
+          execute: async ({ queries, limitPerQuery = 3 }) => {
+            const batches = await Promise.all(
+              queries.map((q) => itunesSearch(q, limitPerQuery))
             );
 
-            // Resolve artist names to Spotify IDs
-            const artistIds: string[] = [];
-            for (const name of seedArtistNames.slice(0, 2)) {
-              const id = await spotifySearchArtistId(name, token);
-              if (id) artistIds.push(id);
+            // Flatten and dedupe by track id
+            const seen = new Set<string>();
+            const tracks: ReturnType<typeof formatTrack>[] = [];
+            for (const batch of batches) {
+              for (const track of batch) {
+                if (!seen.has(track.id)) {
+                  seen.add(track.id);
+                  tracks.push(track);
+                }
+              }
             }
-
-            const totalSeeds =
-              seedTrackIds.length + artistIds.length + seedGenres.length;
-            if (totalSeeds === 0) {
-              return {
-                error:
-                  "Need at least one seed — provide track IDs, artist names, or genres."
-              };
-            }
-
-            const params = new URLSearchParams({ limit: "6" });
-            if (seedTrackIds.length)
-              params.set("seed_tracks", seedTrackIds.slice(0, 3).join(","));
-            if (artistIds.length)
-              params.set("seed_artists", artistIds.slice(0, 3).join(","));
-            if (seedGenres.length)
-              params.set("seed_genres", seedGenres.slice(0, 3).join(","));
-            if (valence !== undefined)
-              params.set("target_valence", valence.toString());
-            if (energy !== undefined)
-              params.set("target_energy", energy.toString());
-            if (danceability !== undefined)
-              params.set("target_danceability", danceability.toString());
-
-            const resp = await fetch(
-              `https://api.spotify.com/v1/recommendations?${params}`,
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            const data =
-              (await resp.json()) as SpotifyRecommendationsResponse;
-            return data.tracks.map(formatTrack);
+            return tracks.slice(0, 8);
           }
         }),
 
         savePreference: tool({
           description:
-            "Save something about this listener's taste to their permanent profile. Call this whenever they reveal a preference.",
+            "Save something about this listener's taste permanently. Call this whenever they reveal a preference — likes, dislikes, moods, artists, genres.",
           inputSchema: z.object({
             type: z.enum([
               "liked_artist",
@@ -271,12 +173,9 @@ Core behaviors:
             ]),
             value: z
               .string()
-              .describe(
-                "The artist name, track name, genre, or mood description to save"
-              )
+              .describe("The artist, track, genre, or mood to save")
           }),
           execute: async ({ type, value }) => {
-            // Avoid exact duplicates
             const existing = this.sql<{ id: number }>`
               SELECT id FROM taste_profile WHERE type = ${type} AND value = ${value} LIMIT 1
             `;
@@ -289,7 +188,7 @@ Core behaviors:
 
         getTasteProfile: tool({
           description:
-            "Retrieve everything Lyra knows about this listener's taste — their likes, dislikes, and mood patterns.",
+            "Retrieve everything Lyra knows about this listener — their likes, dislikes, and mood patterns.",
           inputSchema: z.object({}),
           execute: async () => {
             const rows = this.sql<{
